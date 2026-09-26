@@ -6,6 +6,7 @@ from typing import List, Optional
 from ..database import get_db
 from ..models import donation as donation_model
 from ..schemas import donation as donation_schema
+from scripts.init_db import reset_primary_key_sequences
 
 router = APIRouter(
     prefix="/api/donations",
@@ -33,10 +34,19 @@ def create_donation(donation: donation_schema.DonationCreate, db: Session = Depe
         db.commit()
     except IntegrityError:
         db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Donation creation collided with an existing database row. Please retry after the app re-syncs the seed state.",
-        ) from None
+        reset_primary_key_sequences(db)
+
+        db_donation = donation_model.Donation(**donation.dict())
+        db.add(db_donation)
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Donation creation collided with an existing database row. Please retry after the app re-syncs the seed state.",
+            ) from None
+
     db.refresh(db_donation)
     return db_donation
 

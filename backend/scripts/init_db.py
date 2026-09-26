@@ -41,13 +41,42 @@ def generate_seed_matches(session) -> int:
     return generated_total
 
 
-def reset_primary_key_sequences(session) -> None:
-    """Align auto-increment sequences with the highest explicit primary key already in the database.
+def sync_table_sequence(session, model) -> None:
+    """Advance the table's primary-key sequence to the current max value."""
+    table = model.__table__
+    pk = next(iter(table.primary_key.columns), None)
+    if pk is None:
+        return
 
-    The bundled CSV seeders insert rows using explicit numeric IDs (for example, donation_id values
-    pulled from the dataset). Postgres does not advance its sequence automatically in that case, so the
-    next created donation can attempt to reuse id=1 and fail with a unique-constraint error.
-    """
+    try:
+        max_id = session.query(func.max(pk)).scalar() or 0
+        if max_id <= 0:
+            return
+
+        dialect = session.bind.dialect.name if session.bind is not None else ""
+        if dialect == "postgresql":
+            sequence_name = f"{table.name}_{pk.name}_seq"
+            session.execute(text("SELECT setval(:sequence_name, :max_id, true)"), {
+                "sequence_name": sequence_name,
+                "max_id": max_id,
+            })
+        elif dialect == "sqlite":
+            sqlite_sequence_exists = session.execute(
+                text("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_sequence'")
+            ).first()
+            if sqlite_sequence_exists is None:
+                return
+            session.execute(text("DELETE FROM sqlite_sequence WHERE name = :table_name"), {"table_name": table.name})
+            session.execute(text("INSERT INTO sqlite_sequence (name, seq) VALUES (:table_name, :max_id)"), {
+                "table_name": table.name,
+                "max_id": max_id,
+            })
+    except Exception:
+        logger.warning("Could not update sequence for %s; the database may still accept auto-generated IDs.", table.name, exc_info=True)
+
+
+def reset_primary_key_sequences(session) -> None:
+    """Align auto-increment sequences with the highest explicit primary key already in the database."""
     tables = [
         Restaurant,
         Shelter,
@@ -61,28 +90,7 @@ def reset_primary_key_sequences(session) -> None:
     ]
 
     for model in tables:
-        table = model.__table__
-        pk = next(iter(table.primary_key.columns), None)
-        if pk is None:
-            continue
-
-        try:
-            max_id = session.query(func.max(pk)).scalar() or 0
-            if max_id <= 0:
-                continue
-
-            dialect = session.bind.dialect.name if session.bind is not None else ""
-            if dialect == "postgresql":
-                sequence_name = f"{table.name}_{pk.name}_seq"
-                session.execute(text(f"SELECT setval('{sequence_name}', {max_id}, true)"))
-            elif dialect == "sqlite":
-                session.execute(text("DELETE FROM sqlite_sequence WHERE name = :table_name"), {"table_name": table.name})
-                session.execute(text("INSERT INTO sqlite_sequence (name, seq) VALUES (:table_name, :max_id)"), {
-                    "table_name": table.name,
-                    "max_id": max_id,
-                })
-        except Exception:
-            logger.warning("Could not update sequence for %s; the database may still accept auto-generated IDs.", table.name, exc_info=True)
+        sync_table_sequence(session, model)
 
     session.commit()
 
