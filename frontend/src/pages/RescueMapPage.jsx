@@ -71,6 +71,17 @@ const TELANGANA_ROUTE_PAIRS = [
 
 const urgencyRank = { SAFE: 0, 'AT RISK': 1, URGENT: 2, CRITICAL: 3 };
 
+const normalizeDonationStatus = (status) => {
+  const value = String(status ?? '').trim().toLowerCase().replace(/[_-]+/g, ' ');
+
+  if (!value) return 'available';
+  if (['urgent', 'critical', 'pending', 'at risk', 'available'].includes(value)) return 'available';
+  if (['matching', 'matched', 'match pending'].includes(value)) return 'matched';
+  if (['in transit', 'picked up', 'picked_up', 'pickup', 'en route', 'on route', 'delivery pending'].includes(value)) return 'in transit';
+  if (['delivered', 'completed'].includes(value)) return 'completed';
+  return value;
+};
+
 const classifyDonation = (donation, rescue) => {
   const remainingMinutes = donation.expires_at
     ? (new Date(donation.expires_at).getTime() - Date.now()) / 60000
@@ -103,6 +114,7 @@ export default function RescueMapPage() {
   const [activeFilters, setActiveFilters] = useState({
     all: true,
     restaurants: true,
+    donations: true,
     recipients: true,
     volunteers: true,
     rescues: true,
@@ -110,7 +122,7 @@ export default function RescueMapPage() {
   });
 
   const [selectedEntity, setSelectedEntity] = useState(null);
-  const [mapEntities, setMapEntities] = useState(INDIA_MAP_ENTITIES);
+  const [mapEntities, setMapEntities] = useState([]);
   const [activeRescues, setActiveRescues] = useState([]);
   const [selectedRescue, setSelectedRescue] = useState(null);
   const [routeSegments, setRouteSegments] = useState([]);
@@ -118,47 +130,67 @@ export default function RescueMapPage() {
   const [mapError, setMapError] = useState(null);
 
   useEffect(() => {
-    const useIndiaMockMap = true;
-
-    if (useIndiaMockMap) {
-      const validEntities = INDIA_MAP_ENTITIES
-        .filter((item) => {
-          const lat = Number(item.lat);
-          const lng = Number(item.lng);
-          return Number.isFinite(lat) && Number.isFinite(lng) && lat >= 15.8 && lat <= 19.9 && lng >= 77.0 && lng <= 81.7;
-        })
-        .map((item) => ({
-          ...item,
-          position: isValidPosition([item.lat, item.lng]) ? [item.lat, item.lng] : null,
-        }))
-        .filter((item) => item.position);
-
-      setMapEntities(validEntities);
-      setMapLoading(false);
-      return;
-    }
+    let mounted = true;
+    setMapLoading(true);
+    setMapError(null);
 
     api.getMapData()
       .then(({ data }) => {
+        if (!mounted) return;
+
         const rescues = data.rescues || [];
         const donationsByRestaurant = (data.donations || []).reduce((result, donation) => {
           const rescue = rescues.find((item) => item.donation_id === donation.id);
           const status = classifyDonation(donation, rescue);
-          const key = donation.restaurant_id;
-          result[key] = [...(result[key] || []), { ...donation, urgency: status }];
+          const key = String(donation.restaurant_id);
+          result[key] = [...(result[key] || []), { ...donation, urgency: status, normalizedStatus: normalizeDonationStatus(donation.status) }];
           return result;
         }, {});
-        setActiveRescues(rescues);
-        setMapEntities([
-          ...(data.restaurants || []).map((item) => {
-            const donations = donationsByRestaurant[item.id] || [];
-            const urgency = donations.reduce((highest, donation) => (
-              urgencyRank[donation.urgency] > urgencyRank[highest] ? donation.urgency : highest
-            ), 'SAFE');
-            return { ...item, type: 'restaurant', position: coordinate(item.latitude, item.longitude), donations, urgency };
-          }),
-          ...(data.recipients || []).map((item) => ({ ...item, type: 'recipient', position: coordinate(item.latitude, item.longitude) })),
-          ...(data.volunteers || []).map((item) => ({ ...item, type: 'volunteer', position: coordinate(item.latitude, item.longitude) })),
+
+        const restaurantEntities = (data.restaurants || []).map((item) => {
+          const donations = donationsByRestaurant[String(item.id)] || [];
+          const urgency = donations.length
+            ? donations.reduce((highest, donation) => (
+                urgencyRank[donation.urgency] > urgencyRank[highest] ? donation.urgency : highest
+              ), 'SAFE')
+            : 'SAFE';
+          return {
+            ...item,
+            type: 'restaurant',
+            name: item.name || 'Restaurant',
+            address: item.address || item.name || 'Live donor kitchen',
+            position: coordinate(item.latitude, item.longitude),
+            donations,
+            urgency,
+          };
+        });
+
+        const donationEntities = (data.donations || []).map((donation) => {
+          const restaurant = (data.restaurants || []).find((item) => String(item.id) === String(donation.restaurant_id));
+          const position = coordinate(
+            restaurant?.latitude ?? donation.latitude ?? donation.location_latitude,
+            restaurant?.longitude ?? donation.longitude ?? donation.location_longitude,
+          );
+
+          return {
+            ...donation,
+            id: `donation-${donation.id}`,
+            type: 'donation',
+            name: donation.food_name || donation.foodName || `Donation #${donation.id}`,
+            address: donation.location || restaurant?.address || 'Donation pickup location',
+            position,
+            donationStatus: donation.status,
+            normalizedStatus: normalizeDonationStatus(donation.status),
+            urgency: classifyDonation(donation, rescues.find((item) => item.donation_id === donation.id)),
+            quantity: donation.quantity,
+          };
+        }).filter((item) => item.position);
+
+        const mapData = [
+          ...restaurantEntities,
+          ...donationEntities,
+          ...(data.recipients || []).map((item) => ({ ...item, type: 'recipient', position: coordinate(item.latitude, item.longitude), address: item.address || item.name || 'Recipient location' })),
+          ...(data.volunteers || []).map((item) => ({ ...item, type: 'volunteer', position: coordinate(item.latitude, item.longitude), address: item.address || item.vehicle || 'Volunteer route status' })),
           ...rescues.map((item) => ({
             ...item,
             id: `rescue-${item.rescue_id}`,
@@ -166,11 +198,35 @@ export default function RescueMapPage() {
             name: `Rescue #${item.rescue_id}`,
             position: coordinate(item.volunteer?.latitude, item.volunteer?.longitude)
               || coordinate(item.restaurant?.latitude, item.restaurant?.longitude),
+            address: item.restaurant?.name || item.recipient?.name || 'Rescue route',
           })),
-        ].filter((item) => item.position));
+        ].filter((item) => item.position);
+
+        setActiveRescues(rescues);
+        setMapEntities(mapData);
       })
-      .catch(() => setMapError('Backend unavailable'))
-      .finally(() => setMapLoading(false));
+      .catch(() => {
+        if (!mounted) return;
+        const fallbackEntities = INDIA_MAP_ENTITIES
+          .filter((item) => {
+            const lat = Number(item.lat);
+            const lng = Number(item.lng);
+            return Number.isFinite(lat) && Number.isFinite(lng) && lat >= 15.8 && lat <= 19.9 && lng >= 77.0 && lng <= 81.7;
+          })
+          .map((item) => ({
+            ...item,
+            position: isValidPosition([item.lat, item.lng]) ? [item.lat, item.lng] : null,
+          }))
+          .filter((item) => item.position);
+
+        setMapEntities(fallbackEntities);
+        setMapError('Live backend unavailable — demo map data is shown instead.');
+      })
+      .finally(() => {
+        if (mounted) setMapLoading(false);
+      });
+
+    return () => { mounted = false; };
   }, []);
 
   // Initialize map view for India with Telangana-focused framing in Leaflet.
@@ -300,6 +356,9 @@ export default function RescueMapPage() {
       if (type === 'restaurant') {
         bg = 'bg-amber-500';
         symbol = '🍽';
+      } else if (type === 'donation') {
+        bg = 'bg-rose-500';
+        symbol = '📦';
       } else if (type === 'recipient') {
         bg = 'bg-emerald-600';
         symbol = '🏠';
@@ -329,6 +388,7 @@ export default function RescueMapPage() {
       if (!entity.position || !isValidPosition(entity.position)) return false;
       if (activeFilters.all) return true;
       if (entity.type === 'restaurant' && !activeFilters.restaurants) return false;
+      if (entity.type === 'donation' && !activeFilters.donations) return false;
       if (entity.type === 'recipient' && !activeFilters.recipients) return false;
       if (entity.type === 'volunteer' && !activeFilters.volunteers) return false;
       if (entity.type === 'rescue' && !activeFilters.rescues) return false;
@@ -353,7 +413,10 @@ export default function RescueMapPage() {
         <div style="font-family: inherit; font-size: 12px; line-height: 1.4; padding: 4px;">
           <div style="font-weight: 700; color: #0f172a; margin-bottom: 2px;">${entity.name}</div>
           <div style="color: #64748b; font-size: 11px;">${entity.address || entity.vehicle || ''}</div>
-          <div style="color: #16a34a; font-weight: 600; margin-top: 4px;">${entity.urgency || entity.status || entity.capacity || ''}</div>
+          <div style="color: ${entity.type === 'donation' ? '#e11d48' : '#16a34a'}; font-weight: 600; margin-top: 4px;">
+            ${entity.urgency || entity.status || entity.capacity || entity.donationStatus || ''}
+          </div>
+          ${entity.quantity ? `<div style="color: #475569; margin-top: 4px;">${entity.quantity}</div>` : ''}
         </div>
       `;
       marker.bindPopup(popupContent);
@@ -377,10 +440,10 @@ export default function RescueMapPage() {
   const toggleFilter = (filterKey) => {
     setActiveFilters((prev) => {
       if (filterKey === 'all') {
-        return { ...prev, all: true, restaurants: true, recipients: true, volunteers: true, rescues: true, urgent: false };
+        return { ...prev, all: true, restaurants: true, donations: true, recipients: true, volunteers: true, rescues: true, urgent: false };
       }
       if (prev.all) {
-        return { all: false, restaurants: false, recipients: false, volunteers: false, rescues: false, urgent: false, [filterKey]: true };
+        return { all: false, restaurants: false, donations: false, recipients: false, volunteers: false, rescues: false, urgent: false, [filterKey]: true };
       }
       return { ...prev, all: false, [filterKey]: !prev[filterKey] };
     });
@@ -432,6 +495,17 @@ export default function RescueMapPage() {
             }`}
           >
             Restaurants
+          </button>
+          <button
+            type="button"
+            onClick={() => toggleFilter('donations')}
+            className={`px-2.5 py-1 rounded font-medium transition-colors ${
+              activeFilters.donations && !activeFilters.all
+                ? 'bg-rose-100 text-rose-900 font-semibold'
+                : 'text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            Donation Pins
           </button>
           <button
             type="button"

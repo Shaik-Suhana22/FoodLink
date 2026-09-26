@@ -21,6 +21,27 @@ import { RECENT_DONATIONS } from '../data/mockData';
 import { useToast } from '../components/common/Toast';
 import { api } from '../services/api';
 
+const DONATION_STATUS_OPTIONS = ['All', 'Available', 'Matched', 'In Transit', 'Completed'];
+
+const normalizeDonationStatus = (status) => {
+  const value = String(status ?? '').trim().toLowerCase().replace(/[_-]+/g, ' ');
+
+  if (!value) return 'available';
+  if (['urgent', 'critical', 'pending', 'at risk', 'available'].includes(value)) return 'available';
+  if (['matching', 'matched', 'match pending'].includes(value)) return 'matched';
+  if (['in transit', 'picked up', 'picked_up', 'pickup', 'en route', 'on route', 'delivery pending'].includes(value)) return 'in transit';
+  if (['delivered', 'completed'].includes(value)) return 'completed';
+  return value;
+};
+
+const formatDonationStatus = (status) => {
+  const normalized = normalizeDonationStatus(status);
+  if (normalized === 'matched') return 'Matched';
+  if (normalized === 'in transit') return 'In Transit';
+  if (normalized === 'completed') return 'Completed';
+  return 'Available';
+};
+
 export default function DonationsPage() {
   const navigate = useNavigate();
   const { addToast } = useToast();
@@ -48,29 +69,34 @@ export default function DonationsPage() {
   useEffect(() => { loadDonations(); }, []);
 
   const filteredDonations = useMemo(() => {
-    return donations.map((item) => ({
-      ...item,
-      restaurant: item.restaurant?.name || item.restaurant_name || `Restaurant #${item.restaurant_id}`,
-      foodName: item.foodName || item.food_name,
-      category: item.category || item.food_category,
-      dietType: item.dietType || item.diet_type || 'Not specified',
-      preparedTime: item.preparedTime || item.prepared_at,
-      expiryTime: item.expiryTime || item.expires_at,
-      expiryHours: item.expiryHours || Math.max(0, (new Date(item.expires_at) - Date.now()) / 3600000),
-      storageCondition: item.storageCondition || item.storage_condition || 'Not specified',
-      matchedShelter: item.matchedShelter || null,
-    })).filter((item) => {
+    return donations.map((item) => {
+      const normalizedStatus = normalizeDonationStatus(item.status);
+      return {
+        ...item,
+        restaurant: item.restaurant?.name || item.restaurant_name || `Restaurant #${item.restaurant_id}`,
+        foodName: item.foodName || item.food_name,
+        category: item.category || item.food_category,
+        dietType: item.dietType || item.diet_type || 'Not specified',
+        preparedTime: item.preparedTime || item.prepared_at,
+        expiryTime: item.expiryTime || item.expires_at,
+        expiryHours: item.expiryHours || Math.max(0, (new Date(item.expires_at) - Date.now()) / 3600000),
+        storageCondition: item.storageCondition || item.storage_condition || 'Not specified',
+        matchedShelter: item.matchedShelter || null,
+        normalizedStatus,
+        displayStatus: formatDonationStatus(normalizedStatus),
+      };
+    }).filter((item) => {
       const matchesSearch =
         item.restaurant.toLowerCase().includes(searchTerm.toLowerCase()) ||
         item.foodName.toLowerCase().includes(searchTerm.toLowerCase()) ||
         item.category.toLowerCase().includes(searchTerm.toLowerCase());
 
       const matchesStatus =
-        statusFilter === 'All' || item.status.toLowerCase() === statusFilter.toLowerCase();
+        statusFilter === 'All' || item.normalizedStatus === normalizeDonationStatus(statusFilter);
 
       return matchesSearch && matchesStatus;
     });
-  }, [searchTerm, statusFilter]);
+  }, [searchTerm, statusFilter, donations]);
 
   const handleOpenDetail = (donation) => {
     setSelectedDonation(donation);
@@ -124,7 +150,7 @@ export default function DonationsPage() {
     {
       key: 'status',
       header: 'Status',
-      render: (val) => <Badge status={val} />,
+      render: (val, row) => <Badge status={row.displayStatus || formatDonationStatus(val)}>{row.displayStatus || formatDonationStatus(val)}</Badge>,
     },
     {
       key: 'matchedShelter',
@@ -151,7 +177,7 @@ export default function DonationsPage() {
             <Eye className="w-4 h-4" />
           </Button>
 
-          {row.status === 'Urgent' || row.status === 'Matching' ? (
+          {['available', 'matched'].includes(normalizeDonationStatus(row.status)) ? (
             <Button
               onClick={() => navigate('/matches')}
               variant="primary"
@@ -216,7 +242,7 @@ export default function DonationsPage() {
 
           {/* Status Filter Tabs (Buttons with click handlers) */}
           <div className="flex items-center gap-1 overflow-x-auto w-full md:w-auto p-1 bg-slate-100 rounded-lg">
-            {['All', 'Urgent', 'Matching', 'Matched', 'In Transit', 'Completed'].map((status) => (
+            {DONATION_STATUS_OPTIONS.map((status) => (
               <button
                 key={status}
                 type="button"
