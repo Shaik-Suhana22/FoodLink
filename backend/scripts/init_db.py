@@ -105,7 +105,8 @@ def init_db(reset: bool = False) -> None:
             has_seed_data = any(session.query(model).count() > 0 for model in seeded_tables)
 
             if not reset and has_seed_data:
-                logger.info("Database already contains seed data; skipping CSV reload and syncing primary-key sequences.")
+                logger.info("Database already contains seed data; skipping CSV reload and ensuring match rows exist.")
+                generate_seed_matches(session)
                 reset_primary_key_sequences(session)
                 return
 
