@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
@@ -28,7 +29,14 @@ def read_donation(donation_id: int, db: Session = Depends(get_db)):
 def create_donation(donation: donation_schema.DonationCreate, db: Session = Depends(get_db)):
     db_donation = donation_model.Donation(**donation.dict())
     db.add(db_donation)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Donation creation collided with an existing database row. Please retry after the app re-syncs the seed state.",
+        ) from None
     db.refresh(db_donation)
     return db_donation
 

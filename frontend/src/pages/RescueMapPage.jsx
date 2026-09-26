@@ -95,12 +95,36 @@ const classifyDonation = (donation, rescue) => {
   return 'SAFE';
 };
 
-const coordinate = (latitude, longitude) => {
+const TELANGANA_CITY_ANCHORS = [
+  { lat: 17.385044, lng: 78.486671 },
+  { lat: 17.9689, lng: 79.5941 },
+  { lat: 17.2473, lng: 80.1514 },
+  { lat: 18.6725, lng: 78.0941 },
+  { lat: 16.7436, lng: 78.0041 },
+  { lat: 16.2076, lng: 77.3553 },
+  { lat: 17.3378, lng: 77.9035 },
+  { lat: 19.0804, lng: 79.5605 },
+  { lat: 17.4157, lng: 78.4813 },
+];
+
+const syntheticPositionFromSeed = (seed) => {
+  const numericSeed = Number(seed) || 0;
+  const anchor = TELANGANA_CITY_ANCHORS[Math.abs(numericSeed) % TELANGANA_CITY_ANCHORS.length];
+  const latOffset = (((numericSeed * 13) % 97) / 10000) - 0.0035;
+  const lngOffset = (((numericSeed * 17) % 83) / 10000) - 0.0022;
+  return [anchor.lat + latOffset, anchor.lng + lngOffset];
+};
+
+const coordinate = (latitude, longitude, fallbackSeed = null) => {
   const lat = Number(latitude);
   const lng = Number(longitude);
-  return Number.isFinite(lat) && Number.isFinite(lng) && (lat !== 0 || lng !== 0)
-    ? [lat, lng]
-    : null;
+  if (Number.isFinite(lat) && Number.isFinite(lng) && (lat !== 0 || lng !== 0)) {
+    return [lat, lng];
+  }
+  if (fallbackSeed !== null && fallbackSeed !== undefined && fallbackSeed !== '') {
+    return syntheticPositionFromSeed(fallbackSeed);
+  }
+  return null;
 };
 
 const isValidPosition = (value) => Array.isArray(value) && value.length === 2 && Number.isFinite(value[0]) && Number.isFinite(value[1]);
@@ -159,7 +183,7 @@ export default function RescueMapPage() {
             type: 'restaurant',
             name: item.name || 'Restaurant',
             address: item.address || item.name || 'Live donor kitchen',
-            position: coordinate(item.latitude, item.longitude),
+            position: coordinate(item.latitude, item.longitude, item.id || item.name),
             donations,
             urgency,
           };
@@ -178,7 +202,7 @@ export default function RescueMapPage() {
             type: 'donation',
             name: donation.food_name || donation.foodName || `Donation #${donation.id}`,
             address: donation.location || restaurant?.address || 'Donation pickup location',
-            position,
+            position: position || coordinate(restaurant?.latitude, restaurant?.longitude, donation.id) || coordinate(donation.latitude, donation.longitude, donation.id),
             donationStatus: donation.status,
             normalizedStatus: normalizeDonationStatus(donation.status),
             urgency: classifyDonation(donation, rescues.find((item) => item.donation_id === donation.id)),
